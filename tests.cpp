@@ -5,108 +5,177 @@
 #include <fcntl.h>        // Para configurar las propiedades del socket, como la opción no-bloqueante.
 #include <poll.h>         // Para la función poll(), que nos permite esperar eventos en varios sockets.
 #include <vector>         // Para manejar dinámicamente nuestros clientes.
+#include <sstream>
+#include <map>
+#include <cstring>
 
 
 #define PORT 8080
 #define MAX_CLIENTS 100  //Preguntar para que sirve esto, que es un cliente.
 #define BUFFER_SIZE 1024 //¿Qué datos?
 
-void setNonBlocking(int sockfd)
+int handle_error(int fd, std::string a)
 {
-    int flags = fcntl(sockfd, F_GETFL, 0);      // Obtener los flags actuales del socket.
-    fcntl(sockfd, F_SETFL, flags | O_NONBLOCK); // Añadir la bandera O_NONBLOCK.
+    std::cerr << "Error en '" << a << "': " << strerror(errno) << std::endl;
+    close(fd);
+    return 1;
 }
+
+int setNonBlocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);   // Obtiene los flags actuales del socket
+    if (flags == -1)
+        return handle_error(fd, "get flags");
+
+    // Configura el socket para que sea no bloqueante
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
+        return handle_error(fd, "set non-blocking");
+
+    return 0;
+}
+
+void parseHttpRequest(const std::string& request)
+{
+    std::istringstream stream(request);
+    std::string requestLine;
+    std::getline(stream, requestLine); // Obtener la primera línea
+
+    // Parsear la línea de solicitud
+    std::string method, path, httpVersion;
+    stream >> method >> path >> httpVersion;
+
+    // Almacenar encabezados en un mapa
+    std::map<std::string, std::string> headers;
+    std::string headerLine;
+    while (std::getline(stream, headerLine) && headerLine != "")
+    {
+        size_t separator = headerLine.find(':');
+        if (separator != std::string::npos)
+        {
+            std::string key = headerLine.substr(0, separator);
+            std::string value = headerLine.substr(separator + 1);
+            headers[key] = value;
+        }
+    }
+
+    // Aquí puedes manejar la solicitud según el método y la ruta
+    std::cout << "Method: " << method << std::endl;
+    std::cout << "Path: " << path << std::endl;
+    std::cout << "HTTP Version: " << httpVersion << std::endl;
+
+    // Manejar diferentes métodos
+    if (method == "GET")
+    {
+        if (path == "/")
+        {
+            // Responder a la solicitud para la raíz
+            std::cout << "Handling GET request for root." << std::endl;
+            // Aquí puedes enviar una respuesta
+        }
+        else if (path == "/about")
+        {
+            // Responder a la solicitud para /about
+            std::cout << "Handling GET request for /about." << std::endl;
+            // Aquí puedes enviar una respuesta
+        }
+        // Manejar más rutas según sea necesario
+    }
+    else if (method == "POST")
+    {
+        // Manejar solicitudes POST si es necesario
+        std::cout << "Handling POST request." << std::endl;
+    }
+    else
+    {
+        std::cout << "Unsupported HTTP method." << std::endl;
+    }
+}
+
+
 
 int main()
 {
-    int server_fd, new_socket;  //¿Que es un socket?
+    int server_fd;
+    int new_socket;
+    std::string buffer(1024, '\0');
     struct sockaddr_in address;
-    int addrlen = sizeof(address);
-    char buffer[BUFFER_SIZE];
-    std::vector<pollfd> poll_fds;
+    socklen_t addrlen = sizeof(address);
+    std::vector<pollfd> fds(1);
 
     // Crear socket del servidor
-    if ((server_fd = socket(PF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Error al crear el socket");
-        exit(EXIT_FAILURE);
-    }
+    server_fd = socket(PF_INET, SOCK_STREAM, 0); //PF_Inet es para IPv4, 
+    if (server_fd == -1)
+        return handle_error(server_fd, "socket");
 
-    // Configurar socket del servidor
+    // Configurar socket del servidor para poder ser reusado en on/off rapido
     int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
-        perror("Error en setsockopt");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) 
+        return handle_error(server_fd, "set socket");
 
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
+    address.sin_family = AF_INET; //Ipv4
+    address.sin_addr.s_addr = INADDR_ANY; //Acepta conexiones de cualquier IP
+    address.sin_port = htons(PORT); //Puerto en formato red.
 
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("Error en bind");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) == -1)
+        return handle_error(server_fd, "bind");
 
-    if (listen(server_fd, 3) < 0) {
-        perror("Error en listen");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
+    if (listen(server_fd, 3) == -1) //3 Conex max en cola. SOMAXCONN if wanted all from oper.system
+        return handle_error(server_fd, "listen");
 
-    // Hacer no bloqueante el socket del servidor y agregarlo a poll_fds
-    setNonBlocking(server_fd);
-    poll_fds.push_back({server_fd, POLLIN, 0});
+    if (setNonBlocking(server_fd))
+        return 1;  //fallo algó
 
     std::cout << "Servidor escuchando en el puerto " << PORT << "...\n";
 
-    while (true) {
-        int poll_count = poll(poll_fds.data(), poll_fds.size(), -1);
-        if (poll_count < 0) {
-            perror("Error en poll");
-            break;
+    while (true)
+    {
+        pollfd server; // Solo un socket del servidor
+        fds[0].fd = server_fd; // Socket del servidor
+        fds[0].events = POLLIN; // Espera eventos de entrada (nueva conexión)
+        fds.push_back(server);
+        int ret = poll(fds.data(), fds.size(), -1); // Esperar indefinidamente por eventos
+        if (ret == -1)
+        {
+            std::cerr << "Error en poll: " << strerror(errno) << std::endl;
+            break; //Salir del bucle si hay error
+        }
+        if (fds[0].revents & POLLIN) //Operacion binaria, algun bit de revents coincide con POLLIN, es que el evento ocurrio.
+        {
+            new_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen);
+            if (new_socket == -1)
+            {
+                std::cerr << "Error en accept: " << strerror(errno) << std::endl;
+                continue; // Continuar con la siguiente iteración del bucle
+            }
+            std::cout << "Nueva conexión aceptada en el socket " << new_socket << std::endl;
+            if (setNonBlocking(new_socket))
+                continue; //Nueva iteracion del bucle
+            pollfd client_fd;
+            client_fd.fd = new_socket; // Asignar el nuevo socket
+            client_fd.events = POLLIN | POLLOUT; // Esperar eventos de entrada y salida
+            fds.push_back(client_fd); //Añadirlo al vector de fds (clientes)
         }
 
-        for (size_t i = 0; i < poll_fds.size(); ++i) {
-            if (poll_fds[i].revents & POLLIN) {
-                if (poll_fds[i].fd == server_fd) {
-                    // Nueva conexión entrante
-                    if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-                        perror("Error en accept");
-                        continue;
-                    }
-                    setNonBlocking(new_socket);
-                    poll_fds.push_back({new_socket, POLLIN | POLLOUT, 0});
-                    std::cout << "Nueva conexión aceptada.\n";
-                } else {
-                    // Leer datos de un cliente
-                    memset(buffer, 0, BUFFER_SIZE);
-                    int valread = read(poll_fds[i].fd, buffer, BUFFER_SIZE);
-                    if (valread <= 0) {
-                        close(poll_fds[i].fd);
-                        poll_fds.erase(poll_fds.begin() + i);
-                        std::cout << "Conexión cerrada por el cliente.\n";
-                        --i;
-                    } else {
-                        std::cout << "Mensaje recibido: " << buffer;
-
-                        // Enviar una respuesta HTTP bien formada al cliente
-                        std::string response = "HTTP/1.1 200 OK\r\n"
-                                               "Content-Type: text/plain\r\n"
-                                               "Content-Length: 13\r\n"
-                                               "\r\n"
-                                               "Respuesta bien bacana";
-                        write(poll_fds[i].fd, response.c_str(), response.size());
-                    }
+        for (size_t i = 1; i < fds.size(); ++i) 
+        {
+            if (fds[i].revents & POLLIN) 
+            {
+                // Limpiar el buffer antes de recibir nuevos datos
+                std::fill(buffer.begin(), buffer.end(), '\0');
+                int bytesRead = recv(fds[i].fd, &buffer[0], buffer.size(), 0);
+                if (bytesRead <= 0)
+                {
+                    handle_error(fds[i].fd, "closed client connection");
+                    fds.erase(fds.begin() + i); // Eliminar el socket de la lista
+                    --i; // Decrementar 'i' para no omitir el siguiente cliente
+                }
+                else
+                {
+                    std::cout << "---- Buffer: ----\n\n" << buffer << "------------" << std::endl;
+                    parseHttpRequest(buffer);
                 }
             }
         }
-    }
-
-    // Cerrar sockets
-    for (auto& pfd : poll_fds) {
-        close(pfd.fd);
     }
 
     return 0;
