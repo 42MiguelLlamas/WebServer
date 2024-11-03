@@ -8,6 +8,7 @@
 #include <sstream>
 #include <map>
 #include <cstring>
+#include <fstream>
 
 
 #define PORT 8080
@@ -34,15 +35,50 @@ int setNonBlocking(int fd)
     return 0;
 }
 
-void parseHttpRequest(const std::string& request)
+std::string getHtmlContent(const std::string& path)
+{
+    std::string filePath = "./html" + path;
+    if (filePath.back() == '/')
+        filePath += "index.html"; // Si es la raíz o una carpeta, busca 'index.html'
+    else
+        filePath += ".html"; // Agrega la extensión .html a cualquier otra ruta
+
+    // Intenta abrir el archivo
+    std::ifstream file(filePath);
+    if (!file.is_open()) // Si el archivo no existe, devolver mensaje de error 404
+    {
+        std::cout << "Archivo no encontrado" << std::endl;
+        file.open("./html/404.html");
+        if (!file.is_open())
+        {
+            std::cerr << "Error: No se pudo abrir 404.html tampoco." << std::endl;
+            return "<html><body><h1>404 Not Found</h1><p>El recurso solicitado no fue encontrado en el servidor.</p></body></html>";
+        }
+    }
+    
+    // Lee el contenido del archivo en un string
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    file.close();
+    return buffer.str();
+}
+
+void parseHttpRequest(const std::string& request, int client_fd)
 {
     std::istringstream stream(request);
     std::string requestLine;
-    std::getline(stream, requestLine); // Obtener la primera línea
+    std::getline(stream, requestLine); // Obtener la primera línea completa
 
-    // Parsear la línea de solicitud
+    // Crear un flujo para analizar solo la línea de solicitud
+    std::istringstream requestLineStream(requestLine);
     std::string method, path, httpVersion;
-    stream >> method >> path >> httpVersion;
+    requestLineStream >> method >> path >> httpVersion;
+
+    // Imprimir cada parte de la línea de solicitud
+    std::cout << "Request Line: " << requestLine << std::endl;
+    std::cout << "Method: " << method << std::endl;
+    std::cout << "Path: " << path << std::endl;
+    std::cout << "HTTP Version: " << httpVersion << std::endl;
 
     // Almacenar encabezados en un mapa
     std::map<std::string, std::string> headers;
@@ -58,36 +94,33 @@ void parseHttpRequest(const std::string& request)
         }
     }
 
-    // Aquí puedes manejar la solicitud según el método y la ruta
-    std::cout << "Method: " << method << std::endl;
-    std::cout << "Path: " << path << std::endl;
-    std::cout << "HTTP Version: " << httpVersion << std::endl;
-
     // Manejar diferentes métodos
     if (method == "GET")
     {
-        if (path == "/")
-        {
-            // Responder a la solicitud para la raíz
-            std::cout << "Handling GET request for root." << std::endl;
-            // Aquí puedes enviar una respuesta
-        }
-        else if (path == "/about")
-        {
-            // Responder a la solicitud para /about
-            std::cout << "Handling GET request for /about." << std::endl;
-            // Aquí puedes enviar una respuesta
-        }
-        // Manejar más rutas según sea necesario
+        std::string htmlContent = getHtmlContent(path);
+        std::string response;
+        if (htmlContent.find("404 Not Found") != std::string::npos) // Respuesta 404
+            response = "HTTP/1.1 404 Not Found\r\n";
+        else // Respuesta 200
+            response = "HTTP/1.1 200 OK\r\n";
+        response += "Content-Type: text/html\r\n";
+        response += "Content-Length: " + std::to_string(htmlContent.size()) + "\r\n";
+        response += "\r\n";
+        response += htmlContent;
+        send(client_fd, response.c_str(), response.size(), 0);
     }
     else if (method == "POST")
     {
-        // Manejar solicitudes POST si es necesario
         std::cout << "Handling POST request." << std::endl;
+    }
+    else if (method == "DELETE")
+    {
+        std::cout << "Handling DELETE request." << std::endl;
     }
     else
     {
-        std::cout << "Unsupported HTTP method." << std::endl;
+        std::string response = "HTTP/1.1 501 Not Implemented\r\n\r\n";
+        send(client_fd, response.c_str(), response.size(), 0);
     }
 }
 
@@ -171,12 +204,10 @@ int main()
                 }
                 else
                 {
-                    std::cout << "---- Buffer: ----\n\n" << buffer << "------------" << std::endl;
-                    parseHttpRequest(buffer);
+                    parseHttpRequest(buffer, fds[i].fd);
                 }
             }
         }
     }
-
     return 0;
 }
