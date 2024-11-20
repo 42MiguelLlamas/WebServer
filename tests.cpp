@@ -11,7 +11,6 @@
 #include <fstream>
 
 
-#define PORT 8080
 #define MAX_CLIENTS 100  //Preguntar para que sirve esto, que es un cliente.
 #define BUFFER_SIZE 1024 //¿Qué datos?
 
@@ -19,7 +18,7 @@ int handle_error(int fd, std::string a)
 {
     std::cerr << "Error en '" << a << "': " << strerror(errno) << std::endl;
     close(fd);
-    return 1;
+    return -1;
 }
 
 int setNonBlocking(int fd)
@@ -55,7 +54,6 @@ std::string getHtmlContent(const std::string& path)
             return "<html><body><h1>404 Not Found</h1><p>El recurso solicitado no fue encontrado en el servidor.</p></body></html>";
         }
     }
-    
     // Lee el contenido del archivo en un string
     std::stringstream buffer;
     buffer << file.rdbuf();
@@ -63,11 +61,22 @@ std::string getHtmlContent(const std::string& path)
     return buffer.str();
 }
 
-void parseHttpRequest(const std::string& request, int client_fd)
+std::string generateHttpResponse(const std::string& status, const std::string& content)
+{
+    std::string response = status + "\r\n";
+    response += "Content-Type: text/html\r\n";
+    response += "Content-Length: " + std::to_string(content.size()) + "\r\n";
+    response += "Connection: close\r\n\r\n";
+    response += content;
+    return response;
+}
+
+std::string parseHttpRequest(const std::string& request)
 {
     std::istringstream stream(request);
     std::string requestLine;
     std::getline(stream, requestLine); // Obtener la primera línea completa
+    std::string response;
 
     // Crear un flujo para analizar solo la línea de solicitud
     std::istringstream requestLineStream(requestLine);
@@ -98,7 +107,6 @@ void parseHttpRequest(const std::string& request, int client_fd)
     if (method == "GET")
     {
         std::string htmlContent = getHtmlContent(path);
-        std::string response;
         if (htmlContent.find("404 Not Found") != std::string::npos) // Respuesta 404
             response = "HTTP/1.1 404 Not Found\r\n";
         else // Respuesta 200
@@ -107,36 +115,33 @@ void parseHttpRequest(const std::string& request, int client_fd)
         response += "Content-Length: " + std::to_string(htmlContent.size()) + "\r\n";
         response += "\r\n";
         response += htmlContent;
-        send(client_fd, response.c_str(), response.size(), 0);
+        return response;
     }
     else if (method == "POST")
     {
         std::cout << "Handling POST request." << std::endl;
+        response = "HTTP/1.1 200 OK\r\n";
+        return response;
     }
     else if (method == "DELETE")
     {
         std::cout << "Handling DELETE request." << std::endl;
+        response = "HTTP/1.1 200 OK\r\n";
+        return response;
     }
     else
     {
-        std::string response = "HTTP/1.1 501 Not Implemented\r\n\r\n";
-        send(client_fd, response.c_str(), response.size(), 0);
+        response = "HTTP/1.1 501 Not Implemented\r\n\r\n";
+        return response;
     }
 }
 
 
-
-int main()
+int createServerSocket(int port)
 {
-    int server_fd;
-    int new_socket;
-    std::string buffer(1024, '\0');
     struct sockaddr_in address;
-    socklen_t addrlen = sizeof(address);
-    std::vector<pollfd> fds(1);
-
     // Crear socket del servidor
-    server_fd = socket(PF_INET, SOCK_STREAM, 0); //PF_Inet es para IPv4, 
+    int server_fd = socket(PF_INET, SOCK_STREAM, 0); //PF_Inet es para IPv4, 
     if (server_fd == -1)
         return handle_error(server_fd, "socket");
 
@@ -147,7 +152,7 @@ int main()
 
     address.sin_family = AF_INET; //Ipv4
     address.sin_addr.s_addr = INADDR_ANY; //Acepta conexiones de cualquier IP
-    address.sin_port = htons(PORT); //Puerto en formato red.
+    address.sin_port = htons(port); //Puerto en formato red.
 
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) == -1)
         return handle_error(server_fd, "bind");
@@ -155,17 +160,39 @@ int main()
     if (listen(server_fd, 3) == -1) //3 Conex max en cola. SOMAXCONN if wanted all from oper.system
         return handle_error(server_fd, "listen");
 
-    if (setNonBlocking(server_fd))
-        return 1;  //fallo algó
+    if (setNonBlocking(server_fd) == -1)
+        return -1;  //fallo algó
+    
+    std::cout << "Servidor escuchando en el puerto " << port << "...\n";
+    return server_fd;
+}
 
-    std::cout << "Servidor escuchando en el puerto " << PORT << "...\n";
+
+
+int main()
+{
+    int server_fd;
+    int new_socket;
+    std::string buffer(1024, '\0');
+    socklen_t addrlen; // = sizeof(address);
+    std::vector<pollfd> fds;
+    std::vector<int> ports = {8080, 8081};
+
+
+    // Bucle para crear los sockets de servidores que escuchan en cada puerto.
+    for (int i = 0; i < ports.size(); i++)
+    {
+        server_fd = createServerSocket(ports[i]);
+        if (server_fd == -1)
+            return -1;
+        pollfd server;
+        server.fd = server_fd;
+        server.events = POLLIN;  // Monitorear nuevas conexiones
+        fds.push_back(server);
+    }
 
     while (true)
     {
-        pollfd server; // Solo un socket del servidor
-        fds[0].fd = server_fd; // Socket del servidor
-        fds[0].events = POLLIN; // Espera eventos de entrada (nueva conexión)
-        fds.push_back(server);
         int ret = poll(fds.data(), fds.size(), -1); // Esperar indefinidamente por eventos
         if (ret == -1)
         {
@@ -174,38 +201,50 @@ int main()
         }
         if (fds[0].revents & POLLIN) //Operacion binaria, algun bit de revents coincide con POLLIN, es que el evento ocurrio.
         {
-            new_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen);
-            if (new_socket == -1)
-            {
-                std::cerr << "Error en accept: " << strerror(errno) << std::endl;
-                continue; // Continuar con la siguiente iteración del bucle
-            }
-            std::cout << "Nueva conexión aceptada en el socket " << new_socket << std::endl;
-            if (setNonBlocking(new_socket))
-                continue; //Nueva iteracion del bucle
-            pollfd client_fd;
-            client_fd.fd = new_socket; // Asignar el nuevo socket
-            client_fd.events = POLLIN | POLLOUT; // Esperar eventos de entrada y salida
-            fds.push_back(client_fd); //Añadirlo al vector de fds (clientes)
+            
+            
         }
 
-        for (size_t i = 1; i < fds.size(); ++i) 
+        for (size_t i = 0; i < fds.size(); ++i) //Empieza en 1 porque el 0 es el servidor
         {
             if (fds[i].revents & POLLIN) 
             {
-                // Limpiar el buffer antes de recibir nuevos datos
-                std::fill(buffer.begin(), buffer.end(), '\0');
-                int bytesRead = recv(fds[i].fd, &buffer[0], buffer.size(), 0);
-                if (bytesRead <= 0)
+                if (i < ports.size()) //Sustituir con numero de ports donde lo tengamos
                 {
-                    handle_error(fds[i].fd, "closed client connection");
-                    fds.erase(fds.begin() + i); // Eliminar el socket de la lista
-                    --i; // Decrementar 'i' para no omitir el siguiente cliente
+                    sockaddr_in client_addr;
+                    addrlen = sizeof(client_addr);
+                    new_socket = accept(server_fd, (struct sockaddr *)&client_addr, &addrlen);
+                    if (new_socket == -1)
+                    {
+                        std::cerr << "Error en accept: " << strerror(errno) << std::endl;
+                        continue; // Continuar con la siguiente iteración del bucle
+                    }
+                    std::cout << "Nueva conexión aceptada en el socket " << new_socket << std::endl;
+                    if (setNonBlocking(new_socket))
+                        continue; //Nueva iteracion del bucle
+                    pollfd new_client;
+                    new_client.fd = new_socket; // Asignar el nuevo socket
+                    new_client.events = POLLIN | POLLOUT; // Esperar eventos de entrada y salida
+                    fds.push_back(new_client); //Añadirlo al vector de fds (clientes)
                 }
                 else
                 {
-                    parseHttpRequest(buffer, fds[i].fd);
+                    // Limpiar el buffer antes de recibir nuevos datos
+                    std::fill(buffer.begin(), buffer.end(), '\0');
+                    int bytesRead = recv(fds[i].fd, &buffer[0], buffer.size(), 0);
+                    if (bytesRead <= 0)
+                    {
+                        handle_error(fds[i].fd, "closed client connection");
+                        fds.erase(fds.begin() + i); // Eliminar el socket de la lista
+                        --i; // Decrementar 'i' para no omitir el siguiente cliente
+                    }
+                    else
+                    {
+                        std::string response = parseHttpRequest(buffer);
+                        send(fds[i].fd, response.c_str(), response.size(), 0);
+                    }
                 }
+                
             }
         }
     }
