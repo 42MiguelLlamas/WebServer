@@ -14,6 +14,11 @@
 #define MAX_CLIENTS 100  //Preguntar para que sirve esto, que es un cliente.
 #define BUFFER_SIZE 1024 //¿Qué datos?
 
+struct HttpResponse {
+    std::string content;
+    std::string status;
+};
+
 int handle_error(int fd, std::string a)
 {
     std::cerr << "Error en '" << a << "': " << strerror(errno) << std::endl;
@@ -34,31 +39,44 @@ int setNonBlocking(int fd)
     return 0;
 }
 
-std::string getHtmlContent(const std::string& path)
+HttpResponse getHtmlContent(const std::string& path)
 {
+    HttpResponse response;
     std::string filePath = "./html" + path;
+
+    if (path.find("..") != std::string::npos)
+    {
+        std::cerr << "Intento de acceso no autorizado: " << path << std::endl;
+        response.content = "<html><body><h1>403 Forbidden</h1><p>Acceso denegado.</p></body></html>";
+        response.status = "403 Forbidden";
+        return response;
+    }
+
+    
     if (filePath.back() == '/')
         filePath += "index.html"; // Si es la raíz o una carpeta, busca 'index.html'
     else
         filePath += ".html"; // Agrega la extensión .html a cualquier otra ruta
-
     // Intenta abrir el archivo
+    std::string status = "200 OK";
     std::ifstream file(filePath);
     if (!file.is_open()) // Si el archivo no existe, devolver mensaje de error 404
     {
         std::cout << "Archivo no encontrado" << std::endl;
+        response.status = "404 Not Found";
         file.open("./html/404.html");
         if (!file.is_open())
         {
-            std::cerr << "Error: No se pudo abrir 404.html tampoco." << std::endl;
-            return "<html><body><h1>404 Not Found</h1><p>El recurso solicitado no fue encontrado en el servidor.</p></body></html>";
+            std::cerr << "Error crítico: No se pudo abrir 404.html tampoco." << std::endl;
+            response.content = "<html><body><h1>404 Not Found</h1><p>El recurso solicitado no fue encontrado en el servidor.</p></body></html>";
+            return response;
         }
     }
     // Lee el contenido del archivo en un string
     std::stringstream buffer;
     buffer << file.rdbuf();
     file.close();
-    return buffer.str();
+    return response;
 }
 
 std::string generateHttpResponse(const std::string& status, const std::string& content)
@@ -76,7 +94,7 @@ std::string parseHttpRequest(const std::string& request)
     std::istringstream stream(request);
     std::string requestLine;
     std::getline(stream, requestLine); // Obtener la primera línea completa
-    std::string response;
+    HttpResponse response;
 
     // Crear un flujo para analizar solo la línea de solicitud
     std::istringstream requestLineStream(requestLine);
@@ -106,16 +124,7 @@ std::string parseHttpRequest(const std::string& request)
     // Manejar diferentes métodos
     if (method == "GET")
     {
-        std::string htmlContent = getHtmlContent(path);
-        if (htmlContent.find("404 Not Found") != std::string::npos) // Respuesta 404
-            response = "HTTP/1.1 404 Not Found\r\n";
-        else // Respuesta 200
-            response = "HTTP/1.1 200 OK\r\n";
-        response += "Content-Type: text/html\r\n";
-        response += "Content-Length: " + std::to_string(htmlContent.size()) + "\r\n";
-        response += "\r\n";
-        response += htmlContent;
-        return response;
+        response = getHtmlContent(path);
     }
     else if (method == "POST")
     {
@@ -134,6 +143,7 @@ std::string parseHttpRequest(const std::string& request)
         response = "HTTP/1.1 501 Not Implemented\r\n\r\n";
         return response;
     }
+    return generateHttpResponse(response.content, response.status);
 }
 
 
